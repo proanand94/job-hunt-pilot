@@ -2,8 +2,8 @@ name: job-hunt-collector
 
 on:
   schedule:
-    - cron: "30 1 * * *"   # 7:00 AM IST daily (01:30 UTC)
-  workflow_dispatch:         # Manual trigger from Actions tab
+    - cron: "30 1 * * *"   # 7:00 AM IST daily
+  workflow_dispatch:
 
 jobs:
   collect:
@@ -32,8 +32,17 @@ jobs:
           PROXIES: ${{ secrets.PROXIES }}
         run: python collector/collect_jobs.py
 
-      - name: Send email notification (only if new jobs found)
-        if: ${{ hashFiles('email_body.html') != '' }}
+      - name: Check if email should be sent
+        id: check_email
+        run: |
+          if [ -f email_body.html ]; then
+            echo "send=true" >> $GITHUB_OUTPUT
+          else
+            echo "send=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send email notification
+        if: steps.check_email.outputs.send == 'true'
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
@@ -41,13 +50,12 @@ jobs:
           secure: true
           username: ${{ secrets.GMAIL_USERNAME }}
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
-          subject: "🎯 Job Hunt — new roles found today"
+          subject: "Job Hunt — new roles found today"
           html_body: file://email_body.html
           to: proanand94@gmail.com
           from: "Job Hunt Bot <${{ secrets.GMAIL_USERNAME }}>"
-          priority: normal
 
-      - name: Upload CSV fallback (if produced)
+      - name: Upload CSV fallback
         if: always()
         uses: actions/upload-artifact@v4
         with:
