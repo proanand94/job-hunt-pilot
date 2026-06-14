@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install jobspy gspread google-auth pandas openpyxl requests
+         pip install python-jobspy gspread google-auth pandas openpyxl requests
 
       - name: Run collector
         env:
