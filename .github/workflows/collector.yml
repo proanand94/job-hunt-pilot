@@ -1,64 +1,87 @@
-name: job-hunt-collector
+#!/usr/bin/env python3
+"""
+backfill_seen_urls.py
+---------------------
+One-time script: reads all job URLs from every dated tab in your Job_Raw_Feed
+workbook and adds them to the 'seen_urls' tab so future runs won't repeat them.
 
-on:
-  schedule:
-    - cron: "30 1 * * *"   # 7:00 AM IST daily
-  workflow_dispatch:
+Run once from your laptop:
+  pip install gspread google-auth
+  python backfill_seen_urls.py
 
-jobs:
-  collect:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
+Requires: GOOGLE_SERVICE_ACCOUNT_JSON env var (the full JSON string),
+          or place the JSON file path in SERVICE_ACCOUNT_FILE below.
+"""
 
-    steps:
-      - name: Check out repo
-        uses: actions/checkout@v4
+import os, json
+from datetime import date
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+# ── Config ───────────────────────────────────────────────────────────────────
+SHEET_ID = os.getenv("RAW_FEED_SHEET_ID", "")   # set this env var, or paste ID below
+# SHEET_ID = "YOUR_SHEET_ID_HERE"
 
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install python-jobspy gspread google-auth pandas openpyxl requests
+SERVICE_ACCOUNT_FILE = ""   # path to .json key file, or leave blank to use env var
+# SERVICE_ACCOUNT_FILE = "/path/to/service_account.json"
 
-      - name: Run collector
-        env:
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          RAW_FEED_SHEET_ID: ${{ secrets.RAW_FEED_SHEET_ID }}
-          SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
-          PROXIES: ${{ secrets.PROXIES }}
-        run: python collector/collect_jobs.py
+# ── Auth ─────────────────────────────────────────────────────────────────────
+import gspread
+from google.oauth2.service_account import Credentials
 
-      - name: Check if email should be sent
-        id: check_email
-        run: |
-          if [ -f email_body.html ]; then
-            echo "send=true" >> $GITHUB_OUTPUT
-          else
-            echo "send=false" >> $GITHUB_OUTPUT
-          fi
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
-      - name: Send email notification
-        if: steps.check_email.outputs.send == 'true'
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: smtp.gmail.com
-          server_port: 465
-          secure: true
-          username: ${{ secrets.GMAIL_USERNAME }}
-          password: ${{ secrets.GMAIL_APP_PASSWORD }}
-          subject: "Job Hunt — new roles found today"
-          html_body: file://email_body.html
-          to: proanand94@gmail.com
-          from: "Job Hunt Bot <${{ secrets.GMAIL_USERNAME }}>"
+def auth():
+    if SERVICE_ACCOUNT_FILE:
+        creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+    else:
+        raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+        if not raw:
+            raise SystemExit("Set GOOGLE_SERVICE_ACCOUNT_JSON or SERVICE_ACCOUNT_FILE")
+        info = json.loads(raw)
+        creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+    return gspread.authorize(creds)
 
-      - name: Upload CSV fallback
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: job-raw-feed-csv
-          path: job_raw_feed.csv
-          if-no-files-found: ignore
+# ── Main ─────────────────────────────────────────────────────────────────────
+def main():
+    gc = auth()
+    sh = gc.open_by_key(SHEET_ID)
+
+    # Get or create seen_urls tab
+    try:
+        seen_ws = sh.worksheet("seen_urls")
+        existing = set(v.strip() for v in seen_ws.col_values(1) if v.strip() and v != "job_url")
+        print(f"[info] seen_urls tab exists with {len(existing)} URLs")
+    except gspread.WorksheetNotFound:
+        seen_ws = sh.add_worksheet(title="seen_urls", rows=5000, cols=2)
+        seen_ws.update("A1:B1", [["job_url", "date_seen"]])
+        existing = set()
+        print("[info] Created seen_urls tab")
+
+    # Collect URLs from all dated tabs (e.g. "2026-06-13") and Sheet1/Job_Raw_Feed
+    all_urls = []
+    today_str = str(date.today())
+
+    for ws in sh.worksheets():
+        name = ws.title
+        if name == "seen_urls":
+            continue
+        print(f"[scan] Reading tab: {name}")
+        try:
+            records = ws.get_all_records()
+            for row in records:
+                url = str(row.get("job_url", "")).strip()
+                if url and url not in existing:
+                    all_urls.append([url, today_str])
+                    existing.add(url)
+        except Exception as e:
+            print(f"  [warn] Could not read {name}: {e}")
+
+    if not all_urls:
+        print("[done] No new URLs to backfill — seen_urls is already complete.")
+        return
+
+    # Append to seen_urls
+    seen_ws.append_rows(all_urls, value_input_option="RAW")
+    print(f"[done] Backfilled {len(all_urls)} URLs into seen_urls tab.")
+
+if __name__ == "__main__":
+    main()
